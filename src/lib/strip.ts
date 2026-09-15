@@ -40,7 +40,7 @@ export interface StripCell {
 }
 
 export type Evaluation =
-  | { ok: true; cells: StripCell[] }
+  | { ok: true; values: ValidInputs; cells: StripCell[] }
   | { ok: false; cells: null; errors: FieldErrors };
 
 export const LIMITS = {
@@ -181,10 +181,134 @@ export function evaluate(raw: RawInputs): Evaluation {
   if (values === null) {
     return { ok: false, cells: null, errors };
   }
-  return { ok: true, cells: computeStrip(values) };
+  return { ok: true, values, cells: computeStrip(values) };
 }
 
 /** 按视觉顺序（从左到右）生成制表符分隔的秒数字符串。 */
 export function toTabSeparatedSeconds(cells: StripCell[]): string {
   return cells.map((cell) => cell.secondsLabel).join('\t');
+}
+
+/** 各格的未四舍五入曝光目标（秒），供遮挡操作单累计换算，禁止从一位小数显示值反推。 */
+export function exposureTargets(v: ValidInputs): number[] {
+  const targets: number[] = [];
+  for (let i = 0; i < v.count; i += 1) {
+    const stop = v.start + (i * (v.end - v.start)) / (v.count - 1);
+    targets.push(v.base * 2 ** stop);
+  }
+  return targets;
+}
+
+export interface MaskingStep {
+  /** 步骤序号，从 1 开始（从左到右） */
+  step: number;
+  /** 本步骤的曝光区域描述（全纸 / 遮住左侧已完成格后的余下区域） */
+  area: string;
+  /** 本段分配到的 0.1 秒刻度数（整数） */
+  segmentTicks: number;
+  /** 本段秒数文本：刻度 / 10，保留一位小数 */
+  segmentLabel: string;
+  /** 完成本段后的累计 0.1 秒刻度数 */
+  cumulativeTicks: number;
+  /** 完成格累计时长文本：累计刻度 / 10，保留一位小数 */
+  cumulativeLabel: string;
+}
+
+export type MaskingPlan =
+  | { ok: true; steps: MaskingStep[]; totalTicks: number; totalLabel: string }
+  | { ok: false; steps: null; zeroTickSteps: number[] };
+
+/**
+ * 最大余额法分配 0.1 秒刻度。
+ *
+ * 各段增量 ×10 后先一律向下取整，再把总刻度减去已分配刻度后的剩余刻度，
+ * 按小数余量从大到小逐个发放；余量相同时左侧较早的步骤优先。
+ *
+ * @param increments 各段增量秒数（首段为第一格目标，后续为相邻目标之差）
+ * @param totalTicks 总刻度 = 最高曝光目标 ×10 后十进制四舍五入
+ */
+export function allocateTicks(increments: number[], totalTicks: number): number[] {
+  // toPrecision(15) 消除 20.9999999… 之类二进制尾差，保证向下取整与余量比较按十进制直觉进行
+  const scaled = increments.map((inc) => Number((inc * 10).toPrecision(15)));
+  const ticks = scaled.map((value) => Math.floor(value));
+  const fractions = scaled.map((value, i) => value - ticks[i]);
+
+  let remaining = totalTicks - ticks.reduce((sum, value) => sum + value, 0);
+  const EPSILON = 1e-9;
+  const order = fractions
+    .map((_, i) => i)
+    .sort((a, b) => {
+      const diff = fractions[b] - fractions[a];
+      if (Math.abs(diff) < EPSILON) return a - b; // 余量同分：左侧较早步骤优先
+      return diff;
+    });
+
+  let cursor = 0;
+  while (remaining > 0) {
+    ticks[order[cursor % order.length]] += 1;
+    cursor += 1;
+    remaining -= 1;
+  }
+  return ticks;
+}
+
+/** 操作单表头（也是复制文本的首行）。 */
+export const MASKING_PLAN_HEADER = ['步骤', '曝光区域', '本段秒数', '累计秒数'] as const;
+
+/**
+ * 以未四舍五入的各格曝光为累计目标，生成秒表逐段遮挡操作单。
+ *
+ * 首段增量取第一格目标，后续增量取相邻目标之差；增量 ×10 换算为 0.1 秒刻度，
+ * 总刻度取最高目标 ×10 后十进制四舍五入。任一段分到 0 刻度即判定无法在
+ * 0.1 秒精度形成独立步骤（此时仅操作单隐藏，基础试条不受影响）。
+ */
+export function buildMaskingPlan(v: ValidInputs): MaskingPlan {
+  const targets = exposureTargets(v);
+  const increments = targets.map((target, i) =>
+    i === 0 ? target : target - targets[i - 1],
+  );
+  const totalTicks = roundHalfUp(targets[targets.length - 1] * 10, 0);
+  const segmentTicks = allocateTicks(increments, totalTicks);
+
+  const zeroTickSteps = segmentTicks
+    .map((value, i) => (value === 0 ? i + 1 : null))
+    .filter((value): value is number => value !== null);
+  if (zeroTickSteps.length > 0) {
+    return { ok: false, steps: null, zeroTickSteps };
+  }
+
+  let cumulativeTicks = 0;
+  const steps: MaskingStep[] = segmentTicks.map((value, i) => {
+    cumulativeTicks += value;
+    let area: string;
+    if (i === 0) {
+      area = '全纸（不遮挡）';
+    } else {
+      const masked = i === 1 ? '第 1 格' : `第 1～${i} 格`;
+      area = `遮住左侧已完成${masked}，曝光余下 ${v.count - i} 格`;
+    }
+    return {
+      step: i + 1,
+      area,
+      segmentTicks: value,
+      segmentLabel: (value / 10).toFixed(1),
+      cumulativeTicks,
+      cumulativeLabel: (cumulativeTicks / 10).toFixed(1),
+    };
+  });
+
+  return {
+    ok: true,
+    steps,
+    totalTicks,
+    totalLabel: (totalTicks / 10).toFixed(1),
+  };
+}
+
+/** 生成带表头的制表符遮挡操作单文本，可直接粘贴到电子表格。 */
+export function toTabSeparatedPlan(steps: MaskingStep[]): string {
+  const rows = steps.map((step) =>
+    [step.step, step.area, step.segmentLabel, step.cumulativeLabel].join('\t'),
+  );
+  return [MASKING_PLAN_HEADER.join('\t'), ...rows].join('\n');
 }

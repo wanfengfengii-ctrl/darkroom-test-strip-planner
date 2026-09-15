@@ -270,6 +270,66 @@ body {
   text-align: center;
 }
 
+.plan {
+  margin-top: 20px;
+}
+
+.plan-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.92rem;
+}
+
+.plan-table th,
+.plan-table td {
+  border: 1px solid var(--line);
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.plan-table thead th {
+  background: #faf7f0;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.plan-table tbody tr:nth-child(even) {
+  background: #fdfbf6;
+}
+
+.plan-table td:nth-child(3),
+.plan-table td:nth-child(4) {
+  text-align: right;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.plan-table thead th:nth-child(3),
+.plan-table thead th:nth-child(4) {
+  text-align: right;
+}
+
+.plan-total {
+  margin: 12px 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.plan-total strong {
+  color: var(--accent-dark);
+}
+
+.plan-unavailable {
+  margin: 8px 0 0;
+  padding: 12px 14px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-line);
+  border-radius: 8px;
+  color: var(--danger);
+  font-size: 0.9rem;
+}
+
 @media (max-width: 560px) {
   .result-head {
     grid-template-columns: 1fr;

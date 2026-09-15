@@ -1,10 +1,13 @@
 import { useMemo, useState, type CSSProperties } from 'react';
 import {
+  buildMaskingPlan,
   evaluate,
   LIMITS,
+  toTabSeparatedPlan,
   toTabSeparatedSeconds,
   type FieldErrors,
   type FieldName,
+  type MaskingPlan,
   type RawInputs,
   type StripCell,
 } from './lib/strip';
@@ -60,6 +63,24 @@ type CopyState =
   | { status: 'idle' }
   | { status: 'ok'; message: string }
   | { status: 'fail'; message: string };
+
+/** 写入剪贴板；非安全上下文（如局域网 http）下回退到隐藏 textarea + execCommand。 */
+async function writeToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const holder = document.createElement('textarea');
+  holder.value = text;
+  holder.setAttribute('readonly', '');
+  holder.style.position = 'fixed';
+  holder.style.opacity = '0';
+  document.body.appendChild(holder);
+  holder.select();
+  const copied = document.execCommand('copy');
+  document.body.removeChild(holder);
+  if (!copied) throw new Error('execCommand copy returned false');
+}
 
 function NumberField({
   config,
@@ -118,21 +139,7 @@ function StripView({ cells }: { cells: StripCell[] }) {
 
   async function handleCopy() {
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(tabSeparated);
-      } else {
-        // 非安全上下文（如局域网 http 访问）下的兜底路径
-        const holder = document.createElement('textarea');
-        holder.value = tabSeparated;
-        holder.setAttribute('readonly', '');
-        holder.style.position = 'fixed';
-        holder.style.opacity = '0';
-        document.body.appendChild(holder);
-        holder.select();
-        const copied = document.execCommand('copy');
-        document.body.removeChild(holder);
-        if (!copied) throw new Error('execCommand copy returned false');
-      }
+      await writeToClipboard(tabSeparated);
       setCopyState({ status: 'ok', message: `已复制 ${cells.length} 个秒数（制表符分隔）` });
     } catch {
       setCopyState({
@@ -204,10 +211,99 @@ function StripView({ cells }: { cells: StripCell[] }) {
   );
 }
 
+function MaskingPlanView({ plan }: { plan: MaskingPlan }) {
+  const [copyState, setCopyState] = useState<CopyState>({ status: 'idle' });
+
+  if (!plan.ok) {
+    // 任一段分到 0 刻度：仅隐藏操作单及复制入口，就地说明；基础试条照常显示
+    return (
+      <section className="result plan" aria-live="polite">
+        <div className="result-head">
+          <h2>累积遮挡操作单</h2>
+        </div>
+        <p className="plan-unavailable" data-testid="plan-unavailable" role="status">
+          当前参数无法在 0.1 秒精度形成独立步骤：第 {plan.zeroTickSteps.join('、')} 段曝光增量
+          不足 0.1 秒，遮挡间隔会分到 0 刻度。基础试条仍可使用；可增大基准秒数或缩小档位跨度。
+        </p>
+      </section>
+    );
+  }
+
+  const steps = plan.steps;
+  const tabSeparated = toTabSeparatedPlan(steps);
+
+  async function handleCopy() {
+    try {
+      await writeToClipboard(tabSeparated);
+      setCopyState({
+        status: 'ok',
+        message: `已复制 ${steps.length} 步操作单（含表头，制表符分隔）`,
+      });
+    } catch {
+      setCopyState({
+        status: 'fail',
+        message: '复制失败：浏览器拒绝了剪贴板访问，请手动选择下方表格',
+      });
+    }
+  }
+
+  return (
+    <section className="result plan" aria-live="polite">
+      <div className="result-head">
+        <h2>累积遮挡操作单</h2>
+        <button
+          type="button"
+          className="copy-button"
+          data-testid="copy-plan-button"
+          onClick={handleCopy}
+        >
+          复制操作单
+        </button>
+        <p
+          className={`copy-status copy-status--${copyState.status}`}
+          data-testid="copy-plan-status"
+          role="status"
+        >
+          {copyState.status === 'idle'
+            ? '按步骤执行：先全纸曝光，随后逐段遮住左侧已完成格；累计秒数为该格完成时的总曝光'
+            : copyState.message}
+        </p>
+      </div>
+
+      <table className="plan-table" data-testid="masking-plan">
+        <thead>
+          <tr>
+            <th scope="col">步骤</th>
+            <th scope="col">曝光区域</th>
+            <th scope="col">本段秒数</th>
+            <th scope="col">累计秒数</th>
+          </tr>
+        </thead>
+        <tbody>
+          {steps.map((step) => (
+            <tr key={step.step} data-testid="plan-step">
+              <td data-testid="plan-step-no">{step.step}</td>
+              <td data-testid="plan-area">{step.area}</td>
+              <td data-testid="plan-segment">{step.segmentLabel}</td>
+              <td data-testid="plan-cumulative">{step.cumulativeLabel}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <p className="plan-total" data-testid="plan-total">
+        各段合计 <strong>{plan.totalLabel}</strong> 秒（与最右一格累计曝光一致，0.1 秒刻度守恒）
+      </p>
+    </section>
+  );
+}
+
 export default function App() {
   const [raw, setRaw] = useState<RawInputs>(INITIAL_INPUTS);
   const result = useMemo(() => evaluate(raw), [raw]);
   const errors: FieldErrors = result.ok ? {} : result.errors;
+  // 操作单以未四舍五入的各格曝光为累计目标，不能使用试条上已保留一位小数的显示值
+  const plan = useMemo(() => (result.ok ? buildMaskingPlan(result.values) : null), [result]);
 
   return (
     <main className="page">
@@ -237,7 +333,10 @@ export default function App() {
       </form>
 
       {result.ok ? (
-        <StripView cells={result.cells} />
+        <>
+          <StripView cells={result.cells} />
+          {plan && <MaskingPlanView plan={plan} />}
+        </>
       ) : (
         <section className="result result--empty" data-testid="result-empty" aria-live="polite">
           <p>请修正上方标红的输入：所有字段合法后才会生成试条与秒数序列。</p>
