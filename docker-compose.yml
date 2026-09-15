@@ -1,0 +1,30 @@
+# 暗房试条计算器 —— 纯前端单页，无后端、无外部服务调用
+services:
+  # 开发服务：Vite 热更新，访问 http://localhost:5173
+  web:
+    build:
+      context: .
+    image: darkroom-test-strip:dev
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+    ports:
+      - "5173:5173"
+    volumes:
+      - .:/app:delegated
+      # 容器内使用 Linux 版依赖，不被宿主机 node_modules 覆盖
+      - /app/node_modules
+    init: true
+
+  # 一次性验收服务：运行 Vitest 单元测试与 Playwright 端到端测试后退出。
+  # Playwright 会在容器内自行构建并启动本地预览服务，不依赖 web。
+  # 使用：docker compose run --rm --build verify
+  verify:
+    build:
+      context: .
+    image: darkroom-test-strip:dev
+    command:
+      - sh
+      - -c
+      - "npm run test:unit && npm run test:e2e"
+    environment:
+      CI: "true"
+    profiles: ["verify"]

@@ -1,0 +1,12 @@
+node_modules
+dist
+coverage
+.npm-cache
+test-results
+playwright-report
+.git
+.gitignore
+Dockerfile
+docker-compose.yml
+.dockerignore
+npm-debug.log*
